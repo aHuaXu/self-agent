@@ -1,0 +1,20 @@
+[project]
+name = "self-agent"
+version = "0.1.0"
+description = "A Python project scaffold."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai",
+  "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.5.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
