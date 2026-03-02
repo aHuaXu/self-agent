@@ -17,6 +17,7 @@ class LLMClient:
         "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "moonshot": "https://api.moonshot.cn/v1",
         "siliconflow": "https://api.siliconflow.cn/v1",
+        "modelscope": "https://api-inference.modelscope.cn/v1"
     }
 
     def __init__(self) -> None:
