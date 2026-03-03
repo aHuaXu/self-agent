@@ -1,7 +1,7 @@
 """工具注册表 - HelloAgents原生工具系统"""
 
 from typing import Optional, Any, Callable
-from tool import Tool
+from tools.tool import Tool
 
 class ToolRegistry:
     """工具注册表

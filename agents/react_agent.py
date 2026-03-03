@@ -1,163 +1,225 @@
-﻿"""ReAct agent implementation."""
-
-from __future__ import annotations
+"""ReAct Agent实现 - 推理与行动结合的智能体"""
 
 import re
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from models.agent import Agent
 from models.message import Message
+from models.config import Config
+from llm.llm import LLMClient
+from tools.tool_register import ToolRegistry
 
-try:
-    from tools.tool_register import ToolRegistry, global_registry
-except Exception:
-    ToolRegistry = object  # type: ignore[assignment]
-    global_registry = None
+# 默认ReAct提示词模板
+DEFAULT_REACT_PROMPT = """你是一个具备推理和行动能力的AI助手。你可以通过思考分析问题，然后调用合适的工具来获取信息，最终给出准确的答案。
 
+## 可用工具
+{tools}
 
-class ReactAgent(Agent):
-    """A minimal ReAct agent with tool-use loop."""
+## 工作流程
+请严格按照以下格式进行回应，一次可以执行一个或多个步骤：
 
-    DEFAULT_SYSTEM_PROMPT = (
-        "You are a ReAct assistant.\n"
-        "When tools are needed, use this exact format:\n"
-        "Thought: <reasoning>\n"
-        "Action: <tool_name>\n"
-        "Action Input: <input_string>\n"
-        "Observation: <tool_result>\n"
-        "... (repeat if needed)\n"
-        "Final Answer: <answer_for_user>\n"
-        "Rules:\n"
-        "1. Use only tools from the available tools list.\n"
-        "2. If no tool is needed, reply directly with Final Answer.\n"
-        "3. Keep action input concise and executable.\n"
-        "4. You may emit multiple Action/Action Input blocks in one turn if needed.\n"
-    )
+Thought: 分析问题，确定需要什么信息，制定研究策略。
+Action: 选择合适的工具获取信息，格式为：
+- `{{tool_name}}[{{tool_input}}]`：调用工具获取信息。
+- `Finish[研究结论]`：当你有足够信息得出结论时。
+如果需要调用多个工具，请在Action下按行列出多个工具调用（每行一个）。
 
-    _ACTION_BLOCK_RE = re.compile(
-        r"Action\s*:\s*(?P<action>[^\n\r]+)\s*"
-        r"(?:\nAction\s*Input\s*:\s*(?P<input>[\s\S]*?))?"
-        r"(?=\nAction\s*:|\nObservation\s*:|\nFinal\s*Answer\s*:|\Z)",
-        re.IGNORECASE,
-    )
-    _FINAL_ANSWER_RE = re.compile(
-        r"Final\s*Answer\s*:\s*(?P<answer>[\s\S]+)$",
-        re.IGNORECASE,
-    )
+## 重要提醒
+1. 每次回应必须包含Thought和Action两部分
+2. 工具调用的格式必须严格遵循：工具名[参数]
+3. 只有当你确信有足够信息回答问题时，才使用Finish
+4. 如果工具返回的信息不够，继续使用其他工具或相同工具的不同参数
+5. Action中可以包含多个工具调用，每行一个，按顺序执行
 
+## 当前任务
+**Question:** {question}
+
+## 执行历史
+{history}
+
+现在开始你的推理和行动："""
+
+class ReActAgent(Agent):
+    """
+    ReAct (Reasoning and Acting) Agent
+    
+    结合推理和行动的智能体，能够：
+    1. 分析问题并制定行动计划
+    2. 调用外部工具获取信息
+    3. 基于观察结果进行推理
+    4. 迭代执行直到得出最终答案
+    
+    这是一个经典的Agent范式，特别适合需要外部信息的任务。
+    """
+    
     def __init__(
         self,
         name: str,
-        llm,
-        system_prompt: Optional[str] = None,
-        config=None,
+        llm: LLMClient,
         tool_registry: Optional[ToolRegistry] = None,
+        system_prompt: Optional[str] = None,
+        config: Optional[Config] = None,
         max_steps: int = 5,
-    ) -> None:
-        super().__init__(name=name, llm=llm, system_prompt=system_prompt, config=config)
-        self.tool_registry = tool_registry if tool_registry is not None else global_registry
+        custom_prompt: Optional[str] = None
+    ):
+        """
+        初始化ReActAgent
+
+        Args:
+            name: Agent名称
+            llm: LLM实例
+            tool_registry: 工具注册表（可选，如果不提供则创建空的工具注册表）
+            system_prompt: 系统提示词
+            config: 配置对象
+            max_steps: 最大执行步数
+            custom_prompt: 自定义提示词模板
+        """
+        super().__init__(name, llm, system_prompt, config)
+
+        # 如果没有提供tool_registry，创建一个空的
+        if tool_registry is None:
+            self.tool_registry = ToolRegistry()
+        else:
+            self.tool_registry = tool_registry
+
         self.max_steps = max_steps
+        self.current_history: List[str] = []
+
+        # 设置提示词模板：用户自定义优先，否则使用默认模板
+        self.prompt_template = custom_prompt if custom_prompt else DEFAULT_REACT_PROMPT
+
+    def add_tool(self, tool):
+        """
+        添加工具到工具注册表
+        支持MCP工具的自动展开
+
+        Args:
+            tool: 工具实例(可以是普通Tool或MCPTool)
+        """
+        self.tool_registry.register_tool(tool)
 
     def run(self, input_text: str, **kwargs) -> str:
-        """Execute one ReAct run and return the final output text."""
-        self.add_message(Message(role="user", content=input_text))
-
-        max_steps = int(kwargs.pop("max_steps", self.max_steps))
-        scratchpad = ""
-        last_response = ""
-
-        for _ in range(max_steps):
-            messages = self._build_messages(input_text=input_text, scratchpad=scratchpad)
-            response = self.llm.chat(
-                messages=messages,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                **kwargs,
-            ).strip()
-            last_response = response
-
-            final_answer = self._extract_final_answer(response)
-            if final_answer is not None:
-                self.add_message(Message(role="assistant", content=final_answer))
-                self._trim_history()
-                return final_answer
-
-            actions = self._extract_actions(response)
+        """
+        运行ReAct Agent
+        
+        Args:
+            input_text: 用户问题
+            **kwargs: 其他参数
+            
+        Returns:
+            最终答案
+        """
+        self.current_history = []
+        current_step = 0
+        
+        print(f"\n🤖 {self.name} 开始处理问题: {input_text}")
+        
+        while current_step < self.max_steps:
+            current_step += 1
+            print(f"\n--- 第 {current_step} 步 ---")
+            
+            # 构建提示词
+            tools_desc = self.tool_registry.get_tools_description()
+            history_str = "\n".join(self.current_history)
+            prompt = self.prompt_template.format(
+                tools=tools_desc,
+                question=input_text,
+                history=history_str
+            )
+            
+            # 调用LLM
+            messages = [{"role": "user", "content": prompt}]
+            response_text = self.llm.chat(messages, **kwargs)
+            
+            if not response_text:
+                print("❌ 错误：LLM未能返回有效响应。")
+                break
+            
+            # 解析输出
+            thought, actions = self._parse_output(response_text)
+            
+            if thought:
+                print(f"🤔 思考: {thought}")
+            
             if not actions:
-                self.add_message(Message(role="assistant", content=response))
-                self._trim_history()
-                return response
+                print("⚠️ 警告：未能解析出有效的Action，流程终止。")
+                break
 
-            observation_lines: list[str] = []
-            for action, action_input in actions:
-                observation = self._execute_tool(action=action, action_input=action_input)
-                observation_lines.append(f"Observation: {observation}")
+            # 执行一个或多个Action（按顺序）
+            for action in actions:
+                # 检查是否完成
+                if action.startswith("Finish"):
+                    final_answer = self._parse_action_input(action)
+                    print(f"🎉 最终答案: {final_answer}")
 
-            scratchpad += f"{response}\n" + "\n".join(observation_lines) + "\n"
+                    # 保存到历史记录
+                    self.add_message(Message(input_text, "user"))
+                    self.add_message(Message(final_answer, "assistant"))
 
-        self.add_message(Message(role="assistant", content=last_response))
-        self._trim_history()
-        return last_response
+                    return final_answer
 
-    def _build_messages(self, input_text: str, scratchpad: str) -> list[dict[str, str]]:
-        tools_desc = self._tools_description()
-        system_content = f"{self.system_prompt or self.DEFAULT_SYSTEM_PROMPT}\nAvailable tools:\n{tools_desc}\n"
+                # 执行工具调用
+                tool_name, tool_input = self._parse_action(action)
+                if not tool_name or tool_input is None:
+                    self.current_history.append("Observation: 无效的Action格式，请检查。")
+                    continue
 
-        user_content = f"Question: {input_text}\n"
-        if scratchpad:
-            user_content += f"{scratchpad}\nContinue based on the latest observation."
+                print(f"🎬 行动: {tool_name}[{tool_input}]")
 
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
+                # 调用工具
+                observation = self.tool_registry.execute_tool(tool_name, tool_input)
+                print(f"👀 观察: {observation}")
 
-    def _tools_description(self) -> str:
-        registry = self.tool_registry
-        if registry is None:
-            return "No tools available"
+                # 更新历史
+                self.current_history.append(f"Action: {action}")
+                self.current_history.append(f"Observation: {observation}")
+        
+        print("⏰ 已达到最大步数，流程终止。")
+        final_answer = "抱歉，我无法在限定步数内完成这个任务。"
+        
+        # 保存到历史记录
+        self.add_message(Message(input_text, "user"))
+        self.add_message(Message(final_answer, "assistant"))
+        
+        return final_answer
+    
+    def _parse_output(self, text: str) -> Tuple[Optional[str], List[str]]:
+        """解析LLM输出，提取思考和一个或多个行动"""
+        thought_match = re.search(r"Thought:\s*(.*?)(?:\nAction:|\Z)", text, re.DOTALL)
+        action_match = re.search(r"Action:\s*(.*)", text, re.DOTALL)
 
-        desc_getter = getattr(registry, "get_tools_description", None)
-        if callable(desc_getter):
-            try:
-                return str(desc_getter())
-            except Exception:
-                return "No tools available"
+        thought = thought_match.group(1).strip() if thought_match else None
+        action_block = action_match.group(1).strip() if action_match else ""
 
-        return "No tools available"
+        actions: List[str] = []
+        if action_block:
+            # 优先按行解析，支持：
+            # Action:
+            # - ToolA[input]
+            # - ToolB[input]
+            for raw_line in action_block.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                line = re.sub(r"^[-*]\s*", "", line)
+                line = re.sub(r"^\d+[\).\s-]*", "", line)
+                if re.match(r"^\w+\[.*\]$", line):
+                    actions.append(line)
 
-    def _execute_tool(self, action: str, action_input: str) -> str:
-        registry = self.tool_registry
-        if registry is None:
-            return "Error: tool registry is not configured"
+            # 兼容单行写法：Action: ToolA[input]
+            if not actions and re.match(r"^\w+\[.*\]$", action_block):
+                actions.append(action_block)
 
-        executor = getattr(registry, "execute_tool", None)
-        if not callable(executor):
-            return "Error: tool registry does not implement execute_tool"
-
-        try:
-            return str(executor(action, action_input))
-        except Exception as exc:
-            return f"Error: tool execution failed: {exc}"
-
-    @classmethod
-    def _extract_final_answer(cls, text: str) -> Optional[str]:
-        match = cls._FINAL_ANSWER_RE.search(text)
-        if not match:
-            return None
-        return match.group("answer").strip()
-
-    @classmethod
-    def _extract_actions(cls, text: str) -> list[tuple[str, str]]:
-        actions: list[tuple[str, str]] = []
-        for match in cls._ACTION_BLOCK_RE.finditer(text):
-            action = (match.group("action") or "").strip()
-            action_input = (match.group("input") or "").strip()
-            if action:
-                actions.append((action, action_input))
-        return actions
-
-    def _trim_history(self) -> None:
-        limit = self.config.max_history_length
-        if limit > 0 and len(self._history) > limit:
-            self._history = self._history[-limit:]
+        return thought, actions
+    
+    def _parse_action(self, action_text: str) -> Tuple[Optional[str], Optional[str]]:
+        """解析行动文本，提取工具名称和输入"""
+        match = re.match(r"(\w+)\[(.*)\]", action_text)
+        if match:
+            return match.group(1), match.group(2)
+        return None, None
+    
+    def _parse_action_input(self, action_text: str) -> str:
+        """解析行动输入"""
+        match = re.match(r"\w+\[(.*)\]", action_text)
+        return match.group(1) if match else ""
