@@ -153,8 +153,8 @@ class ReActAgent(Agent):
                     print(f"🎉 最终答案: {final_answer}")
 
                     # 保存到历史记录
-                    self.add_message(Message(input_text, "user"))
-                    self.add_message(Message(final_answer, "assistant"))
+                    self.add_message(Message(content=input_text, role="user"))
+                    self.add_message(Message(content=final_answer, role="assistant"))
 
                     return final_answer
 
@@ -178,8 +178,8 @@ class ReActAgent(Agent):
         final_answer = "抱歉，我无法在限定步数内完成这个任务。"
         
         # 保存到历史记录
-        self.add_message(Message(input_text, "user"))
-        self.add_message(Message(final_answer, "assistant"))
+        self.add_message(Message(content=input_text, role="user"))
+        self.add_message(Message(content=final_answer, role="assistant"))
         
         return final_answer
     
@@ -211,14 +211,14 @@ class ReActAgent(Agent):
                 actions.append(action_block)
 
         return thought, actions
-    
+
     def _parse_action(self, action_text: str) -> Tuple[Optional[str], Optional[str]]:
         """解析行动文本，提取工具名称和输入"""
         match = re.match(r"(\w+)\[(.*)\]", action_text)
         if match:
             return match.group(1), match.group(2)
         return None, None
-    
+
     def _parse_action_input(self, action_text: str) -> str:
         """解析行动输入"""
         match = re.match(r"\w+\[(.*)\]", action_text)
