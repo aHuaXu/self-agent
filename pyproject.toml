@@ -5,6 +5,7 @@ description = "A Python project scaffold."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "fastmcp",
   "openai",
   "python-dotenv",
 ]
@@ -18,3 +19,12 @@ dev = [
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agents*", "models*", "mcp*", "llm*"]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.3.0",
+]

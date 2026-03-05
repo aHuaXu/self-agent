@@ -59,7 +59,7 @@ def test_run_executes_multiple_actions_then_finish() -> None:
     assert history[1].role == "assistant"
 
 
-def test_run_sends_system_and_user_messages() -> None:
+def test_run_sends_user_message() -> None:
     llm = FakeLLM(["Thought: 完成\nAction: Finish[done]"])
     registry = FakeToolRegistry()
     agent = ReActAgent(
@@ -75,9 +75,8 @@ def test_run_sends_system_and_user_messages() -> None:
 
     assert result == "done"
     assert llm.calls
-    assert llm.calls[0][0]["role"] == "system"
-    assert llm.calls[0][0]["content"] == "你是系统提示词"
-    assert llm.calls[0][1]["role"] == "user"
+    assert llm.calls[0][0]["role"] == "user"
+    assert "Question:** 你好" in llm.calls[0][0]["content"]
 
 
 def test_parse_output_supports_numbered_actions() -> None:
